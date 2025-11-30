@@ -1,4 +1,5 @@
-import { DroneSpecs } from './types';
+
+import { DroneSpecs, AIModelConfig } from './types';
 
 // Common Drone Presets for Photogrammetry
 export const DRONE_PRESETS: DroneSpecs[] = [
@@ -10,3 +11,37 @@ export const DRONE_PRESETS: DroneSpecs[] = [
 ];
 
 export const GOOGLE_MAPS_TILE_URL = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}";
+
+export const APP_CONFIG = {
+  defaultTitle: "航测外业成果质量检测助手",
+  defaultCopyright: "版权所有@B站清风搞名堂",
+  bilibiliLink: "https://space.bilibili.com/414317872?spm_id_from=333.1007.0.0",
+  // Default API Key from environment or empty string
+  defaultApiKey: typeof process !== 'undefined' && process.env && process.env.API_KEY ? process.env.API_KEY : ""
+};
+
+export const DEFAULT_AI_CONFIGS: AIModelConfig[] = [
+  {
+    id: 'default-google',
+    name: 'Google Gemini (默认)',
+    provider: 'google',
+    apiKey: APP_CONFIG.defaultApiKey,
+    model: 'gemini-2.5-flash'
+  },
+  {
+    id: 'preset-deepseek',
+    name: 'DeepSeek V3 (推荐)',
+    provider: 'openai',
+    apiKey: '',
+    model: 'deepseek-chat',
+    baseUrl: 'https://api.deepseek.com'
+  },
+  {
+    id: 'custom-openai-example',
+    name: 'OpenAI 兼容接口 (自定义)',
+    provider: 'openai',
+    apiKey: '',
+    model: 'gpt-3.5-turbo',
+    baseUrl: 'https://api.openai.com/v1'
+  }
+];

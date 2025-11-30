@@ -1,7 +1,7 @@
 
 import React, { useCallback, useState } from 'react';
 import { PhotoMetadata } from '../types';
-import { parseMrkContent } from '../utils';
+import { parseMrkContent, extractRelativeAltitude } from '../utils';
 
 interface PhotoUploaderProps {
   onPhotosProcessed: (photos: PhotoMetadata[]) => void;
@@ -57,8 +57,11 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onPhotosProcessed,
     setLoadingText(`正在解析 ${imageFiles.length} 张照片...`);
     const processedPhotos: PhotoMetadata[] = [];
 
-    const processFile = (file: File): Promise<void> => {
-      return new Promise((resolve) => {
+    const processFile = async (file: File): Promise<void> => {
+       // Extract XMP first (Async)
+       const relativeAlt = await extractRelativeAltitude(file);
+
+       return new Promise((resolve) => {
         window.EXIF.getData(file, function (this: any) {
           const lat = window.EXIF.getTag(this, "GPSLatitude");
           const lng = window.EXIF.getTag(this, "GPSLongitude");
@@ -97,6 +100,7 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onPhotosProcessed,
               lat: toDecimal(lat, latRef),
               lng: toDecimal(lng, lngRef),
               alt: Number(alt),
+              relativeAlt: relativeAlt, // Store extracted XMP altitude
               timestamp: timestamp,
               gpsAccuracy: accuracy ? Number(accuracy) : undefined,
               file: file // Keep file reference for later quality check
@@ -116,7 +120,6 @@ export const PhotoUploader: React.FC<PhotoUploaderProps> = ({ onPhotosProcessed,
     }
 
     // Sort photos to match MRK sequence (Assuming alphabetic or timestamp order matches 1..N)
-    // Most DJI drones name sequentially: DJI_0001.JPG, DJI_0002.JPG
     processedPhotos.sort((a, b) => a.name.localeCompare(b.name));
 
     // Map RTK status

@@ -1,19 +1,17 @@
-
 import { GoogleGenAI } from "@google/genai";
-import { FlightMetrics, DroneSpecs } from '../types';
+import { FlightMetrics, DroneSpecs, AIModelConfig } from '../types';
 
 export const analyzeFlightData = async (
   metrics: FlightMetrics,
   drone: DroneSpecs,
   photoCount: number,
-  warnings: string[]
+  warnings: string[],
+  config: AIModelConfig // New Argument
 ): Promise<string> => {
   
-  if (!process.env.API_KEY) {
-    throw new Error("API Key not found");
+  if (!config.apiKey) {
+    throw new Error("请先在设置中配置 API Key");
   }
-
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
   const rtkText = metrics.rtkFixedRatio === -1 
     ? "无 MRK 数据 (单点定位)" 
@@ -21,8 +19,10 @@ export const analyzeFlightData = async (
 
   const qualityText = `模糊照片: ${metrics.qualityIssues.blurryCount} 张, 过曝照片: ${metrics.qualityIssues.overexposedCount} 张`;
 
+  const systemInstruction = `你是一位具有10年以上经验的无人机测绘（摄影测量）总工程师。请检查这份外业成果数据，生成一份专业的《外业成果质量检查报告》。报告必须客观、严谨，指出所有潜在隐患。`;
+
   const prompt = `
-    你是一位具有10年以上经验的无人机测绘（摄影测量）总工程师。请检查这份外业成果数据，生成一份专业的《外业成果质量检查报告》。
+    ${systemInstruction}
 
     **项目摘要:**
     - 机型: ${drone.name} (传感器尺寸: ${drone.sensorWidth}x${drone.sensorHeight}mm)
@@ -58,17 +58,63 @@ export const analyzeFlightData = async (
   `;
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: prompt,
-      config: {
-        thinkingConfig: { thinkingBudget: 0 } 
-      }
-    });
+    // 1. Google Gemini Native SDK
+    if (config.provider === 'google') {
+        const apiKey = config.apiKey || process.env.API_KEY;
+        if (!apiKey) throw new Error("缺少 Google API Key");
 
-    return response.text || "无法生成分析报告，请稍后再试。";
-  } catch (error) {
-    console.error("Gemini Analysis Error:", error);
-    throw new Error("AI分析服务暂时不可用");
+        const ai = new GoogleGenAI({ apiKey });
+        const response = await ai.models.generateContent({
+          model: config.model,
+          contents: prompt,
+          config: {
+            thinkingConfig: { thinkingBudget: 0 } 
+          }
+        });
+        return response.text || "AI 返回了空内容。";
+    } 
+    
+    // 2. OpenAI Compatible Fetch
+    else if (config.provider === 'openai') {
+        let baseUrl = config.baseUrl?.trim() || "https://api.openai.com/v1";
+        
+        // Robust sanitization to prevent 404s
+        // Remove trailing slash
+        baseUrl = baseUrl.replace(/\/$/, "");
+        // Remove specific endpoints if the user pasted the full URL (e.g., .../chat/completions)
+        baseUrl = baseUrl.replace(/\/chat\/completions$/, "");
+        baseUrl = baseUrl.replace(/\/chat$/, "");
+        
+        const url = `${baseUrl}/chat/completions`;
+        
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`
+            },
+            body: JSON.stringify({
+                model: config.model,
+                messages: [
+                    { role: "system", content: systemInstruction },
+                    { role: "user", content: prompt }
+                ]
+            })
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`OpenAI API Error: ${response.status} - ${errText}`);
+        }
+
+        const data = await response.json();
+        return data.choices?.[0]?.message?.content || "AI 返回了空内容。";
+    }
+
+    return "不支持的 AI 提供商配置";
+
+  } catch (error: any) {
+    console.error("AI Analysis Error:", error);
+    throw new Error(`AI分析服务错误: ${error.message || "未知错误"}`);
   }
 };

@@ -1,4 +1,3 @@
-
 import { PhotoMetadata, DroneSpecs, FlightMetrics } from './types';
 
 // Earth radius in meters
@@ -49,7 +48,8 @@ export const calculateStatistics = (values: number[]) => {
   return { mean, stdDev, min, max };
 };
 
-export const calculateBoundingBoxArea = (photos: PhotoMetadata[]) => {
+// Updated: Accepts marginW and marginH to expand the box by the photo footprint
+export const calculateBoundingBoxArea = (photos: PhotoMetadata[], marginW: number = 0, marginH: number = 0) => {
    if (photos.length < 3) return 0;
    const origin = photos[0];
    let minX = 0, maxX = 0, minY = 0, maxY = 0;
@@ -62,7 +62,12 @@ export const calculateBoundingBoxArea = (photos: PhotoMetadata[]) => {
       if (y > maxY) maxY = y;
    });
 
-   return (maxX - minX) * (maxY - minY); 
+   // The area is the path bounding box extended by half the footprint on each side (total + 1 full width/height)
+   // Box width = (Max X - Min X) + Single Photo Width
+   const width = (maxX - minX) + marginW;
+   const height = (maxY - minY) + marginH;
+
+   return width * height; 
 };
 
 export const calculateAverageSpeed = (photos: PhotoMetadata[]) => {
@@ -87,7 +92,7 @@ export const calculateAverageSpeed = (photos: PhotoMetadata[]) => {
 };
 
 // Calculate Flight Line Curvature (Average heading deviation on straight segments)
-export const calculateFlightCurvature = (photos: PhotoMetadata[]) => {
+export const calculateFlightCurvature = (photos: PhotoMetadata[], excludeTurns: boolean = false) => {
   if (photos.length < 3) return { avg: 0, max: 0, maxPhotoName: null };
   const sorted = [...photos].sort((a, b) => a.timestamp - b.timestamp);
   
@@ -96,6 +101,11 @@ export const calculateFlightCurvature = (photos: PhotoMetadata[]) => {
   let maxDeviation = 0;
   let maxPhotoName: string | null = null;
   
+  // Threshold to consider it a "turn" vs "wiggle"
+  // Default logic ignores intentional U-turns (> 20 degrees).
+  // If excludeTurns is true, we use a stricter threshold (e.g. > 10 degrees) to ignore entry/exit of turns.
+  const turnThreshold = excludeTurns ? 10 : 20;
+
   for (let i = 0; i < sorted.length - 2; i++) {
     const p1 = sorted[i];
     const p2 = sorted[i+1];
@@ -112,8 +122,8 @@ export const calculateFlightCurvature = (photos: PhotoMetadata[]) => {
       let diff = Math.abs(b1 - b2);
       if (diff > 180) diff = 360 - diff;
       
-      // Filter out intentional turns (e.g., > 20 degrees is likely a turn-around)
-      if (diff < 20) {
+      // Filter out turns based on threshold
+      if (diff < turnThreshold) {
         totalDeviation += diff;
         count++;
 
@@ -137,11 +147,13 @@ export const calculateOverlaps = (
   drone: DroneSpecs,
   relativeHeight: number
 ) => {
-  if (photos.length < 2) return { forward: 0, side: 0, gsd: 0 };
-
   const groundWidth = (drone.sensorWidth * relativeHeight) / drone.focalLength;
   const groundHeight = (drone.sensorHeight * relativeHeight) / drone.focalLength;
+  
+  // Note: GSD calculation assumes a standard pixel count (approx 20MP / 5472px width) as pixel pitch isn't in specs.
   const estimatedGSD = ((drone.sensorWidth / 5472) * (relativeHeight / drone.focalLength) * 100).toFixed(2);
+
+  if (photos.length < 2) return { forward: 0, side: 0, gsd: 0, groundWidth, groundHeight };
 
   const sortedPhotos = [...photos].sort((a, b) => a.timestamp - b.timestamp);
   let totalForwardOverlap = 0;
@@ -162,18 +174,46 @@ export const calculateOverlaps = (
   let totalSideOverlap = 0;
   let sideCount = 0;
 
+  // New Approach: Directional Filtering
+  // Only consider photos that are roughly perpendicular to the current flight direction as "side neighbors"
   for (let i = 0; i < sortedPhotos.length; i++) {
     const p1 = sortedPhotos[i];
+    
+    // Determine current heading
+    let heading = 0;
+    if (i < sortedPhotos.length - 1) {
+       heading = calculateBearing(p1, sortedPhotos[i+1]);
+    } else if (i > 0) {
+       heading = calculateBearing(sortedPhotos[i-1], p1);
+    }
+
     let minSideDist = Infinity;
     
     for (let j = 0; j < sortedPhotos.length; j++) {
-      if (Math.abs(i - j) < 5) continue; 
-      const dist = calculateDistance(p1, sortedPhotos[j]);
-      if (dist < minSideDist) minSideDist = dist;
+      // 1. Sequence Filter: Ignore immediate neighbors in time (likely same strip)
+      if (Math.abs(i - j) < 20) continue; 
+
+      const p2 = sortedPhotos[j];
+      const dist = calculateDistance(p1, p2);
+      
+      // 2. Range Filter: Ignore points too far away (e.g., > 3x ground width)
+      if (dist > groundWidth * 3) continue;
+
+      // 3. Angle Filter: Check if the neighbor is actually "to the side"
+      const bearingToNeighbor = calculateBearing(p1, p2);
+      let angleDiff = Math.abs(heading - bearingToNeighbor);
+      if (angleDiff > 180) angleDiff = 360 - angleDiff;
+
+      // Acceptance Window: 45° to 135° (Center at 90°) implies the point is perpendicular
+      if (angleDiff > 45 && angleDiff < 135) {
+         if (dist < minSideDist) minSideDist = dist;
+      }
     }
 
-    if (minSideDist < Infinity && minSideDist < groundWidth * 2) {
-       const overlap = Math.max(0, (1 - (minSideDist / groundWidth)) * 100);
+    if (minSideDist < Infinity) {
+       // Side overlap formula: 1 - (Distance / Coverage Width)
+       // Clamp between 0 and 100
+       const overlap = Math.max(0, Math.min(100, (1 - (minSideDist / groundWidth)) * 100));
        totalSideOverlap += overlap;
        sideCount++;
     }
@@ -182,13 +222,41 @@ export const calculateOverlaps = (
   return {
     forward: count > 0 ? totalForwardOverlap / count : 0,
     side: sideCount > 0 ? totalSideOverlap / sideCount : 0,
-    gsd: parseFloat(estimatedGSD)
+    gsd: parseFloat(estimatedGSD),
+    groundWidth,
+    groundHeight
   };
 };
 
-// --- NEW FEATURES ---
+export const extractRelativeAltitude = (file: File): Promise<number | undefined> => {
+  return new Promise((resolve) => {
+    // Read the first 64KB which typically contains the XMP metadata header
+    const blob = file.slice(0, 64 * 1024);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = e.target?.result as string;
+      if (!text) {
+        resolve(undefined); 
+        return;
+      }
+      
+      // Try to find DJI relative altitude
+      const regex1 = /drone-dji:RelativeAltitude="([+|-]?\d*\.?\d*)"/i;
+      const regex2 = /<drone-dji:RelativeAltitude>([+|-]?\d*\.?\d*)<\/drone-dji:RelativeAltitude>/i;
 
-// Parse .MRK file content
+      const match = text.match(regex1) || text.match(regex2);
+      
+      if (match && match[1]) {
+        resolve(parseFloat(match[1]));
+      } else {
+        resolve(undefined);
+      }
+    };
+    reader.onerror = () => resolve(undefined);
+    reader.readAsText(blob);
+  });
+};
+
 export const parseMrkContent = (content: string): Map<number, 'FIXED' | 'FLOAT' | 'SINGLE'> => {
   const map = new Map<number, 'FIXED' | 'FLOAT' | 'SINGLE'>();
   const lines = content.split('\n');
@@ -210,7 +278,6 @@ export const parseMrkContent = (content: string): Map<number, 'FIXED' | 'FLOAT' 
   return map;
 };
 
-// Analyze Image Quality (Blur & Exposure)
 export const analyzeImageQuality = (file: File): Promise<{ isBlurry: boolean; blurScore: number; isOverexposed: boolean; exposureScore: number }> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -272,43 +339,44 @@ export const analyzeImageQuality = (file: File): Promise<{ isBlurry: boolean; bl
   });
 };
 
-// Helper: Parse Markdown to HTML
-const parseMarkdown = (markdown: string): string => {
+export const parseMarkdown = (markdown: string): string => {
   if (!markdown) return '';
   let html = markdown
+    // Convert Headers
     .replace(/^### (.*$)/gim, '<h3>$1</h3>')
     .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+    // Convert Bold
     .replace(/\*\*(.*)\*\*/gim, '<strong>$1</strong>')
+    // Convert List Items
     .replace(/^\- (.*$)/gim, '<li>$1</li>')
+    
+    // AGGRESSIVELY REMOVE EMPTY LINES
+    .replace(/^\s*[\r\n]/gm, '') 
+    
+    // Convert newlines to HTML breaks (only for actual content breaks)
     .replace(/\n/gim, '<br />');
 
-  // Wrap loose list items in ul (simple heuristic)
+  // Wrap lists
   if (html.includes('<li>')) {
-      // Find groups of li and wrap
-      // This is a simplified parser; for full robustness use a library, 
-      // but this suffices for standard Gemini structure.
       html = html.replace(/(<li>.*<\/li>)/gim, '<ul>$1</ul>'); 
-      // Fix double wrapping if multiple lines
+      // Remove double breaks that might appear around lists
       html = html.replace(/<\/ul><br \/><ul>/gim, '');
   }
   
   return html;
 };
 
-// Helper: Generate Flight Path SVG
-const generateFlightPathSVG = (photos: PhotoMetadata[], maxCurvatureName: string | null): string => {
+export const generateFlightPathSVG = (photos: PhotoMetadata[], maxCurvatureName: string | null): string => {
   if (photos.length < 2) return '';
 
   const sorted = [...photos].sort((a, b) => a.timestamp - b.timestamp);
   const origin = sorted[0];
   
-  // 1. Calculate relative coordinates
   const points = sorted.map(p => {
     const { x, y } = projectToPlane(origin, p);
     return { x, y, name: p.name, isMaxCurve: p.name === maxCurvatureName };
   });
 
-  // 2. Find bounds
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   points.forEach(p => {
     if (p.x < minX) minX = p.x;
@@ -317,7 +385,6 @@ const generateFlightPathSVG = (photos: PhotoMetadata[], maxCurvatureName: string
     if (p.y > maxY) maxY = p.y;
   });
 
-  // Add padding
   const padding = Math.max(20, (maxX - minX) * 0.05);
   minX -= padding; maxX += padding;
   minY -= padding; maxY += padding;
@@ -325,29 +392,24 @@ const generateFlightPathSVG = (photos: PhotoMetadata[], maxCurvatureName: string
   const width = maxX - minX;
   const height = maxY - minY;
   
-  // 3. Generate SVG Path
-  // SVG coordinate system: Y increases downwards. Geography: Y (North) increases upwards.
-  // We flip Y: svgY = maxY - y
   const getSvgX = (x: number) => x - minX;
   const getSvgY = (y: number) => maxY - y;
 
   const polylinePoints = points.map(p => `${getSvgX(p.x)},${getSvgY(p.y)}`).join(' ');
 
-  // 4. Generate SVG Circles
   const circles = points.map((p, i) => {
     const cx = getSvgX(p.x);
     const cy = getSvgY(p.y);
     let fill = '#6366f1';
-    let r = 2; // default small radius for vector export
+    let r = 2; 
     
-    if (i === 0) { fill = '#10b981'; r = 4; } // Start
-    else if (i === points.length - 1) { fill = '#ef4444'; r = 4; } // End
-    else if (p.isMaxCurve) { fill = '#ec4899'; r = 6; } // Max Curve
+    if (i === 0) { fill = '#10b981'; r = 4; } 
+    else if (i === points.length - 1) { fill = '#ef4444'; r = 4; } 
+    else if (p.isMaxCurve) { fill = '#ec4899'; r = 6; } 
 
     return `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}" />`;
   }).join('');
 
-  // 5. Construct SVG
   return `
     <svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" style="width: 100%; height: auto; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
       <polyline points="${polylinePoints}" fill="none" stroke="#94a3b8" stroke-width="1" />
@@ -362,24 +424,17 @@ const generateFlightPathSVG = (photos: PhotoMetadata[], maxCurvatureName: string
   `;
 };
 
-// Generate HTML Report
 export const generateHtmlReport = (
   metrics: FlightMetrics,
   drone: DroneSpecs,
-  photos: PhotoMetadata[], // Added photos argument
+  photos: PhotoMetadata[], 
   aiReport: string,
   inspectorName: string
 ) => {
   const dateStr = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
-  
-  // Units Conversion
   const areaMu = (metrics.areaCovered / 666.667).toFixed(2);
   const areaM2 = metrics.areaCovered.toFixed(0);
-
-  // Generate SVG Visualization
   const flightPathSvg = generateFlightPathSVG(photos, metrics.maxCurvaturePhotoName);
-
-  // Parse AI Markdown
   const aiHtmlContent = parseMarkdown(aiReport);
 
   return `
@@ -390,7 +445,12 @@ export const generateHtmlReport = (
     <title>航测外业成果质检报告</title>
     <style>
         body { font-family: "SimSun", "Songti SC", serif; color: #333; line-height: 1.6; max-width: 210mm; margin: 0 auto; padding: 20px; background: #fff; }
-        @media print { body { padding: 0; } .no-print { display: none; } .page-break { page-break-before: always; } }
+        @media print { 
+            body { padding: 0; } 
+            .no-print { display: none; } 
+            .page-break { page-break-before: always; display: block; height: 1px; } 
+            .chart-container { break-inside: avoid; }
+        }
         h1 { text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 30px; font-size: 24px; }
         h2 { border-left: 4px solid #4f46e5; padding-left: 10px; margin-top: 30px; font-size: 18px; background: #f9fafb; padding: 8px 10px; }
         h3 { font-size: 16px; margin-top: 15px; color: #1e1b4b; font-weight: bold; }
@@ -398,9 +458,12 @@ export const generateHtmlReport = (
         .info-item { display: flex; border-bottom: 1px solid #eee; padding-bottom: 5px; }
         .label { font-weight: bold; width: 120px; color: #555; }
         .value { font-family: Arial, sans-serif; font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-        th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }
-        th { background-color: #f3f4f6; font-weight: bold; }
+        
+        /* Updated Table Styles for Print */
+        table { width: 99%; border-collapse: collapse; margin: 15px 0; table-layout: fixed; }
+        th, td { border: 1px solid #000 !important; padding: 8px 12px; text-align: left; word-wrap: break-word; }
+        th { background-color: #f3f4f6; font-weight: bold; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        
         .status-good { color: green; font-weight: bold; }
         .status-bad { color: red; font-weight: bold; }
         .ai-content { background: #fdfdfd; padding: 15px; border: 1px dashed #ccc; font-size: 14px; }
@@ -410,7 +473,7 @@ export const generateHtmlReport = (
         .footer { margin-top: 50px; border-top: 1px solid #000; padding-top: 20px; display: flex; justify-content: space-between; }
         .sign-box { width: 200px; text-align: center; }
         .copyright { text-align: center; margin-top: 40px; font-size: 12px; color: #888; }
-        .chart-container { margin: 20px 0; padding: 10px; border: 1px solid #eee; break-inside: avoid; }
+        .chart-container { margin: 20px 0; padding: 10px; border: 1px solid #eee; }
     </style>
 </head>
 <body>
@@ -428,6 +491,12 @@ export const generateHtmlReport = (
 
     <h2>1. 作业基本参数</h2>
     <table>
+        <colgroup>
+            <col style="width: 15%">
+            <col style="width: 35%">
+            <col style="width: 15%">
+            <col style="width: 35%">
+        </colgroup>
         <tr>
             <th>照片总数</th>
             <td>${photos.length} 张</td>
@@ -435,7 +504,7 @@ export const generateHtmlReport = (
             <td>${areaM2} m² (${areaMu} 亩)</td>
         </tr>
         <tr>
-            <th>平均航高</th>
+            <th>平均航高 (Abs)</th>
             <td>${metrics.avgAltitude.toFixed(1)} m</td>
             <th>飞行时长</th>
             <td>${metrics.flightDuration.toFixed(1)} 分钟</td>
@@ -445,6 +514,18 @@ export const generateHtmlReport = (
             <td>${metrics.avgSpeed.toFixed(1)} m/s</td>
             <th>地面分辨率</th>
             <td>${metrics.groundResolution} cm/px</td>
+        </tr>
+        <tr>
+             <th>单片覆盖 (WxH)</th>
+             <td>${metrics.singlePhotoW.toFixed(1)}m × ${metrics.singlePhotoH.toFixed(1)}m</td>
+             <th>单片面积</th>
+             <td>${metrics.singlePhotoArea.toFixed(0)} m²</td>
+        </tr>
+        <tr>
+             <th>估算地面高程</th>
+             <td>${metrics.estTerrainMin.toFixed(1)}m ~ ${metrics.estTerrainMax.toFixed(1)}m</td>
+             <th>估算测区高差</th>
+             <td>${metrics.estTerrainDiff.toFixed(1)} m</td>
         </tr>
     </table>
 
@@ -502,12 +583,13 @@ export const generateHtmlReport = (
         </tbody>
     </table>
 
-    <div class="page-break"></div>
-
     <h2>3. 外业航线还原图</h2>
     <div class="chart-container">
        ${flightPathSvg}
     </div>
+
+    <!-- PAGE BREAK FOR PRINTING -->
+    <div class="page-break"></div>
 
     <h2>4. 智能分析结论</h2>
     <div class="ai-content">

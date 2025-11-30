@@ -5,6 +5,7 @@ export interface PhotoMetadata {
   lat: number;
   lng: number;
   alt: number; // Absolute altitude
+  relativeAlt?: number; // Relative altitude from XMP
   timestamp: number;
   gpsAccuracy?: number; // GPS Positioning Error (meters)
   rtkStatus?: 'FIXED' | 'FLOAT' | 'SINGLE' | 'NONE'; // From .MRK file
@@ -30,6 +31,7 @@ export interface FlightMetrics {
   altitudeStdDev: number;
   minAltitude: number;
   maxAltitude: number;
+  avgRelativeAltitude?: number; // Average extracted relative altitude
   avgForwardOverlap: number;
   avgSideOverlap: number;
   groundResolution: number;
@@ -49,6 +51,13 @@ export interface FlightMetrics {
   startTime: string;
   startGpsTime: string;
   startBdtTime: string;
+  // Single Photo & Terrain Stats
+  singlePhotoW: number; // Ground Width in meters
+  singlePhotoH: number; // Ground Height in meters
+  singlePhotoArea: number; // Ground Area in sq meters
+  estTerrainMax: number; // Estimated Max Terrain Height
+  estTerrainMin: number; // Estimated Min Terrain Height
+  estTerrainDiff: number; // Estimated Terrain Difference
 }
 
 export enum AnalysisStatus {
@@ -56,4 +65,13 @@ export enum AnalysisStatus {
   ANALYZING,
   COMPLETED,
   ERROR
+}
+
+export interface AIModelConfig {
+  id: string;
+  name: string; // Display Name (e.g., "My Gemini", "DeepSeek")
+  provider: 'google' | 'openai';
+  apiKey: string;
+  model: string; // Model ID (e.g., "gemini-2.5-flash", "gpt-4")
+  baseUrl?: string; // Only for OpenAI compatible
 }
